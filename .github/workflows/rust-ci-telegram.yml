@@ -1,0 +1,85 @@
+name: Reusable Rust CI with Telegram Alerts
+
+on:
+  workflow_call:
+    # 1. Inputs: जो हर प्रोजेक्ट अपने हिसाब से बदल सकता है
+    inputs:
+      project_name:
+        description: 'ट्रेडिंग प्रोजेक्ट का नाम (Telegram अलर्ट के लिए)'
+        required: true
+        type: string
+      run_release_build:
+        description: 'क्या cargo build --release भी चलाना है?'
+        required: false
+        type: boolean
+        default: false
+      notify_on_success:
+        description: 'क्या पास होने पर भी Telegram मैसेज भेजना है?'
+        required: false
+        type: boolean
+        default: false
+
+    # 2. Secrets: जो कॉल करने वाला प्रोजेक्ट पास करेगा
+    secrets:
+      TELEGRAM_BOT_TOKEN:
+        required: true
+      TELEGRAM_CHAT_ID:
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust_ci:
+    name: Rust CI (${{ inputs.project_name }})
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy linter
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run unit tests
+        run: cargo test --verbose
+
+      # केवल तभी चलेगा जब प्रोजेक्ट ने run_release_build: true भेजा हो
+      - name: Build release binary
+        if: ${{ inputs.run_release_build }}
+        run: cargo build --release --verbose
+
+      # फेल होने पर हमेशा Telegram अलर्ट भेजें
+      - name: Telegram Failure Alert
+        if: failure()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="🚨 <b>CI फेल: ${{ inputs.project_name }}</b>%0Aब्रांच: <code>${{ github.ref_name }}</code>%0Aलॉग्स: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      # पास होने पर (केवल अगर notify_on_success: true हो)
+      - name: Telegram Success Alert
+        if: success() && inputs.notify_on_success
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            -d parse_mode="HTML" \
+            -d text="✅ <b>CI पास: ${{ inputs.project_name }}</b>%0Aसभी Rust टेस्ट और Clippy चेक सफल रहे।"
